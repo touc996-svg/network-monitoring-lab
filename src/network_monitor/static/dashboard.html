@@ -1,0 +1,124 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width,initial-scale=1">
+<title>Network Monitoring Lab</title>
+<style>
+:root{color-scheme:dark;--bg:#0b1020;--panel:#121a2c;--line:#26334a;--muted:#93a4bb;--text:#e8eef8;--blue:#60a5fa;--green:#34d399;--red:#fb7185;--amber:#fbbf24}
+*{box-sizing:border-box}body{margin:0;background:var(--bg);color:var(--text);font:14px system-ui,sans-serif}
+main{max-width:1150px;margin:auto;padding:28px}header{display:flex;justify-content:space-between;align-items:center;gap:15px;flex-wrap:wrap}
+h1{margin:0 0 6px;font-size:25px}.muted{color:var(--muted)}.grid{display:grid;grid-template-columns:repeat(4,1fr);gap:14px;margin:22px 0}
+.card{background:var(--panel);border:1px solid var(--line);border-radius:12px;padding:18px;margin-bottom:16px}
+.metric{font-size:30px;font-weight:750;margin-top:6px}.label{font-size:11px;color:var(--muted);text-transform:uppercase;letter-spacing:.08em}
+form{display:grid;grid-template-columns:2fr 2fr 1fr 1fr auto;gap:10px;align-items:end}
+label{display:grid;gap:6px;color:var(--muted);font-size:12px}
+input,select,button{padding:10px 12px;border-radius:8px;border:1px solid var(--line);background:#172238;color:var(--text);min-width:0}
+button{background:#2563eb;border-color:#2563eb;cursor:pointer;font-weight:650}
+button:disabled{opacity:.55;cursor:wait}table{width:100%;border-collapse:collapse;text-align:left}
+th,td{padding:12px 9px;border-bottom:1px solid var(--line);vertical-align:top}
+th{font-size:11px;color:var(--muted);text-transform:uppercase}
+.table-wrap{overflow-x:auto}.status{font-weight:750}.up{color:var(--green)}.down{color:var(--red)}.pending{color:var(--amber)}
+#message{margin:12px 0;color:var(--muted)}@media(max-width:760px){main{padding:16px}.grid{grid-template-columns:repeat(2,1fr)}form{grid-template-columns:1fr 1fr}}
+</style>
+</head>
+<body>
+<main>
+<header>
+  <div><h1>Network Monitoring Lab</h1><div class="muted">TCP availability · DNS resolution · Check history</div></div>
+  <button onclick="refresh()">Refresh</button>
+</header>
+
+<section class="grid">
+  <div class="card"><div class="label">Registered targets</div><div class="metric" id="total">0</div></div>
+  <div class="card"><div class="label">Last known UP</div><div class="metric up" id="up">0</div></div>
+  <div class="card"><div class="label">Last known DOWN</div><div class="metric down" id="down">0</div></div>
+  <div class="card"><div class="label">Not checked yet</div><div class="metric pending" id="unchecked">0</div></div>
+</section>
+
+<section class="card">
+  <h2>Register an authorized target</h2>
+  <form id="targetForm">
+    <label>Target name<input name="name" required minlength="2" maxlength="80" placeholder="Local web service"></label>
+    <label>Hostname or IP<input name="host" required placeholder="127.0.0.1 or example.com"></label>
+    <label>Check type<select name="check_type" id="checkType"><option value="tcp">TCP port</option><option value="dns">DNS resolution</option></select></label>
+    <label>Port<input name="port" id="port" type="number" min="1" max="65535" value="80"></label>
+    <button type="submit">Add target</button>
+  </form>
+  <div id="message" aria-live="polite"></div>
+</section>
+
+<section class="card">
+  <h2>Registered targets</h2>
+  <div class="table-wrap"><table><thead><tr><th>Name</th><th>Host</th><th>Check</th><th>Latest status</th><th>Latency</th><th>Action</th></tr></thead><tbody id="targetRows"></tbody></table></div>
+</section>
+
+<section class="card">
+  <h2>Recent check history</h2>
+  <div class="table-wrap"><table><thead><tr><th>Target</th><th>Status</th><th>Latency</th><th>Result</th><th>Checked at</th></tr></thead><tbody id="checkRows"></tbody></table></div>
+</section>
+<p class="muted">Local lab only. Register and monitor only systems you own or are explicitly authorized to test. Checks are manually triggered in this MVP.</p>
+</main>
+<script>
+const safe = value => String(value ?? "—").replace(/[&<>"']/g,c=>({"&":"&amp;","<":"&lt;",">":"&gt;",'"':"&quot;","'":"&#39;"}[c]));
+async function api(url, options={}) {
+  const response=await fetch(url,options);
+  const data=await response.json();
+  if(!response.ok) throw new Error(data.detail || `HTTP ${response.status}`);
+  return data;
+}
+async function refresh() {
+  try {
+    const [summary,targets,checks]=await Promise.all([
+      api("/api/v1/summary"),api("/api/v1/targets"),api("/api/v1/checks?limit=30")
+    ]);
+    for(const key of ["total_targets","up_targets","down_targets","unchecked_targets"])
+      document.getElementById(({total_targets:"total",up_targets:"up",down_targets:"down",unchecked_targets:"unchecked"})[key]).textContent=summary[key];
+    const latest={};
+    checks.forEach(c=>{if(!latest[c.target_id])latest[c.target_id]=c});
+    document.getElementById("targetRows").innerHTML=targets.length?targets.map(t=>{
+      const c=latest[t.id];
+      return `<tr><td>${safe(t.name)}</td><td>${safe(t.host)}</td>
+      <td>${safe(t.check_type.toUpperCase())}${t.port?":"+safe(t.port):""}</td>
+      <td class="status ${c?.status || "pending"}">${safe(c?.status?.toUpperCase() || "NOT CHECKED")}</td>
+      <td>${c?safe(c.latency_ms)+" ms":"—"}</td>
+      <td><button onclick="runCheck(${t.id},this)">Check now</button></td></tr>`;
+    }).join(""):'<tr><td colspan="6" class="muted">No targets registered yet.</td></tr>';
+    document.getElementById("checkRows").innerHTML=checks.length?checks.map(c=>
+      `<tr><td>${safe(c.target_name)}<br><span class="muted">${safe(c.host)}</span></td>
+      <td class="status ${safe(c.status)}">${safe(c.status.toUpperCase())}</td>
+      <td>${safe(c.latency_ms)} ms</td><td>${safe(c.message)}</td><td>${safe(c.checked_at)}</td></tr>`
+    ).join(""):'<tr><td colspan="5" class="muted">No checks recorded yet.</td></tr>';
+  } catch(error) {document.getElementById("message").textContent=error.message;}
+}
+async function runCheck(id,button){
+  button.disabled=true;button.textContent="Checking...";
+  try{
+    const result=await api(`/api/v1/targets/${id}/check`,{method:"POST"});
+    document.getElementById("message").textContent=`${result.target.name}: ${result.check.status.toUpperCase()} · ${result.check.message}`;
+    await refresh();
+  }catch(error){document.getElementById("message").textContent=error.message;}
+  finally{button.disabled=false;button.textContent="Check now";}
+}
+document.getElementById("checkType").addEventListener("change",event=>{
+  const dns=event.target.value==="dns";
+  document.getElementById("port").disabled=dns;
+  if(dns)document.getElementById("port").value="";
+  else document.getElementById("port").value="80";
+});
+document.getElementById("targetForm").addEventListener("submit",async event=>{
+  event.preventDefault();
+  const form=event.currentTarget;
+  const data=Object.fromEntries(new FormData(form));
+  data.port=data.check_type==="tcp"?Number(data.port):null;
+  try{
+    await api("/api/v1/targets",{method:"POST",headers:{"Content-Type":"application/json"},body:JSON.stringify(data)});
+    document.getElementById("message").textContent="Target registered.";
+    form.reset();document.getElementById("port").disabled=false;document.getElementById("port").value="80";
+    await refresh();
+  }catch(error){document.getElementById("message").textContent=error.message;}
+});
+refresh();
+</script>
+</body>
+</html>
